@@ -1,0 +1,83 @@
+# Windows 版のアプリを自動で作る。
+#   - main に push するたび: exe を作って動作テストし、Actions の「Artifacts」に置く
+#   - v1.0 のようなタグを push したとき: さらに「Releases」に zip を載せる（ここからダウンロードするのが簡単）
+name: Windows 版をビルド
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write  # Releases に載せるため
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: ライブラリを入れる
+        run: pip install -r requirements.txt pyinstaller requests pillow
+
+      - name: exe を作る
+        run: python build.py
+
+      - name: rubberband（高音質なテンポ調整）を同梱する
+        continue-on-error: true  # 取れなくてもアプリは動く（librosa で代用）
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://breakfastquay.com/files/releases/rubberband-3.3.0-gpl-executable-windows.zip -OutFile rb.zip
+          Expand-Archive rb.zip -DestinationPath rb
+          $exe = Get-ChildItem rb -Recurse -Filter rubberband.exe | Select-Object -First 1
+          New-Item -ItemType Directory -Force "dist/AI DJ/rubberband" | Out-Null
+          Copy-Item -Recurse "$($exe.DirectoryName)/*" "dist/AI DJ/rubberband/"
+          Get-ChildItem "dist/AI DJ/rubberband"
+          & "dist/AI DJ/rubberband/rubberband.exe" --version
+
+      - name: デモ曲を作る
+        run: python make_demo.py
+
+      - name: 動作テスト（exe で曲の読み込み → ミックス → 書き出し）
+        run: python ci/smoke_test.py "dist/AI DJ/AI DJ.exe"
+
+      - name: ウィンドウ表示のテスト（スクリーンショット）
+        continue-on-error: true
+        run: python ci/screenshot.py "dist/AI DJ/AI DJ.exe"
+
+      - name: テスト結果を保存
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-output
+          path: ci-output/
+          if-no-files-found: ignore
+
+      - name: アプリを保存
+        uses: actions/upload-artifact@v4
+        with:
+          name: AI-DJ-windows
+          path: dist/AI DJ/
+
+      - name: zip にまとめる
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: 7z a -tzip AI-DJ-windows.zip "./dist/AI DJ"
+
+      - name: Releases に載せる
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: AI-DJ-windows.zip
+          body: |
+            Windows 版の AI DJ です。
+
+            1. 下の **AI-DJ-windows.zip** をダウンロードして、右クリック →「すべて展開」
+            2. 展開したフォルダの中の **AI DJ.exe** をダブルクリック
+               - 「Windows によって PC が保護されました」と出たら「詳細情報」→「実行」

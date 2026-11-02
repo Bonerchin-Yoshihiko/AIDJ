@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI DJ</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="empty">
+  <header class="topbar">
+    <div class="brand"><span class="logo" aria-hidden="true"></span>AI DJ</div>
+    <div class="settings">
+      <label>つなぎ
+        <select id="bars">
+          <option value="2">2小節</option>
+          <option value="4">4小節</option>
+          <option value="8" selected>8小節</option>
+          <option value="16">16小節</option>
+        </select>
+      </label>
+      <label>テンポ
+        <input id="bpm" type="number" min="40" max="220" step="0.1" placeholder="自動">
+      </label>
+      <label>テンポ変化の上限
+        <select id="maxStretch">
+          <option value="0.08">±8%</option>
+          <option value="0.15" selected>±15%</option>
+          <option value="0.25">±25%</option>
+        </select>
+      </label>
+    </div>
+    <button id="mixBtn" class="primary" disabled>ミックスする</button>
+  </header>
+
+  <main>
+    <p class="hint">波形の上をドラッグして<strong>聴かせたい範囲</strong>を選びます（範囲の端をドラッグで伸び縮み、内側をドラッグで移動）。最初は一番盛り上がっている部分を仮に選んでいます。</p>
+    <section id="setlist" aria-label="セットリスト"></section>
+    <label id="drop" class="drop">
+      <input id="fileInput" type="file" accept="audio/*,.mp3,.wav,.flac,.ogg,.aif,.aiff" multiple hidden>
+      <strong>曲を追加</strong>
+      <span>ここにドラッグ＆ドロップ、またはクリックして選択（mp3 / wav / flac / ogg）</span>
+    </label>
+  </main>
+
+  <section id="deck" class="deck" hidden aria-label="ミックス">
+    <div class="deck-inner">
+      <div class="deck-head">
+        <button id="deckPlay" class="round" aria-label="再生" disabled>▶</button>
+        <div class="deck-title">
+          <strong>ミックス</strong>
+          <span id="deckInfo" class="muted"></span>
+        </div>
+        <span id="deckTime" class="muted tnum"></span>
+        <span id="staleNote" class="stale-note" hidden>変更があります。もう一度ミックスすると反映されます</span>
+        <button id="saveBtn" disabled>保存する</button>
+      </div>
+      <div id="deckProgress" class="progress-wrap" hidden>
+        <div class="progress"><div></div></div>
+        <span id="deckMessage" class="muted"></span>
+      </div>
+      <div id="deckWave" class="deck-wave"></div>
+    </div>
+  </section>
+
+  <div id="toasts" aria-live="polite"></div>
+
+  <template id="track-tpl">
+    <article class="track">
+      <div class="track-head">
+        <span class="num"></span>
+        <h2 class="name"></h2>
+        <span class="meta tnum"></span>
+        <div class="head-actions">
+          <button class="icon up" title="上へ" aria-label="上へ">↑</button>
+          <button class="icon down" title="下へ" aria-label="下へ">↓</button>
+          <button class="icon dup" title="同じ曲をもう一度使う（別の範囲用）" aria-label="複製">⧉</button>
+          <button class="icon remove" title="セットリストから外す" aria-label="外す">✕</button>
+        </div>
+      </div>
+      <div class="wave"><div class="loading">解析中…</div></div>
+      <div class="track-controls">
+        <button class="play" disabled>▶ 範囲を試聴</button>
+        <label>開始 <input class="t-start tnum" inputmode="decimal" disabled></label>
+        <label>終了 <input class="t-end tnum" inputmode="decimal" disabled></label>
+        <span class="len tnum"></span>
+        <label>ループ
+          <select class="loops" disabled>
+            <option value="1">なし</option>
+            <option value="2">×2</option>
+            <option value="3">×3</option>
+            <option value="4">×4</option>
+            <option value="8">×8</option>
+          </select>
+        </label>
+        <span class="plan tnum"></span>
+      </div>
+    </article>
+  </template>
+
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>
