@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """CI 用: 作った exe を起動して、曲の読み込み → ミックス → 書き出しまで通るか確かめる。
 
-  python ci/smoke_test.py "dist/AI DJ/AI DJ.exe"
+  python ci/smoke_test.py "dist/Miso Soup/Miso Soup.exe"
 """
 import os
 import subprocess
@@ -14,7 +14,7 @@ import requests
 import soundfile as sf
 
 URL = "http://127.0.0.1:8765"
-LOG = os.path.join(tempfile.gettempdir(), "aidj.log")
+LOG = os.path.join(tempfile.gettempdir(), "miso-soup.log")
 OUT = "ci-output"
 
 

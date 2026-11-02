@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""配布用のアプリを作る。Windows なら dist/AI DJ/AI DJ.exe、Mac なら dist/AI DJ.app ができる。
+"""配布用のアプリを作る。Windows なら dist/Miso Soup/Miso Soup.exe、Mac なら dist/Miso Soup.app ができる。
 
   pip install -r requirements.txt pyinstaller
   pip install -r requirements-ai.txt && pip install --no-deps demucs==4.1.0   # AI のパート分けも入れるとき
@@ -15,7 +15,7 @@ import PyInstaller.__main__
 
 args = [
     "app.py",
-    "--name=AI DJ",
+    "--name=Miso Soup",
     "--windowed",          # コンソール画面を出さない（Mac では .app になる）
     "--noconfirm",
     "--clean",

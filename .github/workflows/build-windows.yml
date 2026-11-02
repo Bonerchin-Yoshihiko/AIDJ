@@ -54,10 +54,10 @@ jobs:
           Invoke-WebRequest https://breakfastquay.com/files/releases/rubberband-3.3.0-gpl-executable-windows.zip -OutFile rb.zip
           Expand-Archive rb.zip -DestinationPath rb
           $exe = Get-ChildItem rb -Recurse -Filter rubberband.exe | Select-Object -First 1
-          New-Item -ItemType Directory -Force "dist/AI DJ/rubberband" | Out-Null
-          Copy-Item -Recurse "$($exe.DirectoryName)/*" "dist/AI DJ/rubberband/"
-          Get-ChildItem "dist/AI DJ/rubberband"
-          & "dist/AI DJ/rubberband/rubberband.exe" --version
+          New-Item -ItemType Directory -Force "dist/Miso Soup/rubberband" | Out-Null
+          Copy-Item -Recurse "$($exe.DirectoryName)/*" "dist/Miso Soup/rubberband/"
+          Get-ChildItem "dist/Miso Soup/rubberband"
+          & "dist/Miso Soup/rubberband/rubberband.exe" --version
 
       - name: デモ曲を作る
         run: python make_demo.py
@@ -68,16 +68,16 @@ jobs:
       - name: アプリの大きさ
         shell: pwsh
         run: |
-          $size = (Get-ChildItem -Recurse "dist/AI DJ" | Measure-Object -Property Length -Sum).Sum / 1MB
-          "dist/AI DJ: {0:N0} MB" -f $size
-          Get-ChildItem "dist/AI DJ/_internal" -Directory | ForEach-Object { "{0,8:N0} MB  {1}" -f ((Get-ChildItem -Recurse $_.FullName | Measure-Object -Property Length -Sum).Sum / 1MB), $_.Name } | Sort-Object -Descending | Select-Object -First 8
+          $size = (Get-ChildItem -Recurse "dist/Miso Soup" | Measure-Object -Property Length -Sum).Sum / 1MB
+          "dist/Miso Soup: {0:N0} MB" -f $size
+          Get-ChildItem "dist/Miso Soup/_internal" -Directory | ForEach-Object { "{0,8:N0} MB  {1}" -f ((Get-ChildItem -Recurse $_.FullName | Measure-Object -Property Length -Sum).Sum / 1MB), $_.Name } | Sort-Object -Descending | Select-Object -First 8
 
       - name: 動作テスト（exe で曲の読み込み → ミックス → 書き出し）
-        run: python ci/smoke_test.py "dist/AI DJ/AI DJ.exe"
+        run: python ci/smoke_test.py "dist/Miso Soup/Miso Soup.exe"
 
       - name: ウィンドウ表示のテスト（スクリーンショット）
         continue-on-error: true
-        run: python ci/screenshot.py "dist/AI DJ/AI DJ.exe"
+        run: python ci/screenshot.py "dist/Miso Soup/Miso Soup.exe"
 
       - name: テスト結果を保存
         if: always()
@@ -90,11 +90,11 @@ jobs:
       - name: アプリを保存
         uses: actions/upload-artifact@v4
         with:
-          name: AI-DJ-windows
-          path: dist/AI DJ/
+          name: Miso-Soup-windows
+          path: dist/Miso Soup/
 
       - name: zip にまとめる
-        run: 7z a -tzip AI-DJ-windows.zip "./dist/AI DJ"
+        run: 7z a -tzip Miso-Soup-windows.zip "./dist/Miso Soup"
 
       - name: Releases に載せる
         uses: softprops/action-gh-release@v2
@@ -103,10 +103,10 @@ jobs:
           tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v0.1.{0}', github.run_number) }}
           target_commitish: ${{ github.sha }}
           make_latest: "true"
-          files: AI-DJ-windows.zip
+          files: Miso-Soup-windows.zip
           body: |
-            Windows 版の AI DJ です。
+            Windows 版の Miso Soup です。
 
-            1. 下の **AI-DJ-windows.zip** をダウンロードして、右クリック →「すべて展開」
-            2. 展開したフォルダの中の **AI DJ.exe** をダブルクリック
+            1. 下の **Miso-Soup-windows.zip** をダウンロードして、右クリック →「すべて展開」
+            2. 展開したフォルダの中の **Miso Soup.exe** をダブルクリック
                - 「Windows によって PC が保護されました」と出たら「詳細情報」→「実行」

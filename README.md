@@ -1,13 +1,13 @@
-# AI DJ 試作
+# Miso Soup
 
 曲ごとに「ここを聴かせたい！」という範囲を指定すると、テンポを揃えてつないだミックスを書き出します。
 
 ## Windows 版をダウンロードする
 
-1. このリポジトリの **Releases** から `AI-DJ-windows.zip` をダウンロード
-2. 右クリック →「すべて展開」して、中の **AI DJ.exe** をダブルクリック
+1. このリポジトリの **Releases** から `Miso-Soup-windows.zip` をダウンロード
+2. 右クリック →「すべて展開」して、中の **Miso Soup.exe** をダブルクリック
    - 「Windows によって PC が保護されました」と出たら「詳細情報」→「実行」
-   - うまく動かないときは `%TEMP%\aidj.log` にログが残っています
+   - うまく動かないときは `%TEMP%\miso-soup.log` にログが残っています
 
 main に push するたびに、GitHub Actions が exe を作って動作テストし、テストが通ったら Releases に新しい版（v0.1.番号）を載せます。
 
@@ -71,7 +71,7 @@ pip install pyinstaller
 python build.py
 ```
 
-- Windows なら `dist/AI DJ/AI DJ.exe`、Mac なら `dist/AI DJ.app` ができる（その OS の上で実行する）
+- Windows なら `dist/Miso Soup/Miso Soup.exe`、Mac なら `dist/Miso Soup.app` ができる（その OS の上で実行する）
 - rubberband の実行ファイルをアプリと同じフォルダに置くと、高音質なテンポ調整が使われる
 - Mac で「開発元を確認できない」と出たら、右クリック →「開く」
 

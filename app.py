@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AI DJ デスクトップアプリ。
+"""Miso Soup デスクトップアプリ。
 
   python app.py            # アプリのウィンドウで開く
   python app.py --browser  # いつものブラウザで開く（ウィンドウが開けない環境向け）
@@ -21,8 +21,8 @@ FROZEN = getattr(sys, "frozen", False)
 HERE = sys._MEIPASS if FROZEN else os.path.dirname(os.path.abspath(__file__))
 APP_DIR = os.path.dirname(sys.executable) if FROZEN else HERE
 
-# ウィンドウだけのアプリとして固めると標準出力がないので、ログファイル（%TEMP%\aidj.log など）に書く
-LOG_PATH = os.path.join(tempfile.gettempdir(), "aidj.log")
+# ウィンドウだけのアプリとして固めると標準出力がないので、ログファイル（%TEMP%\miso-soup.log など）に書く
+LOG_PATH = os.path.join(tempfile.gettempdir(), "miso-soup.log")
 if sys.stdout is None or sys.stderr is None:
     _log = open(LOG_PATH, "a", encoding="utf-8", buffering=1)
     sys.stdout = sys.stdout or _log
@@ -145,7 +145,7 @@ def mix_audio(jid):
     if job["state"] != "done":
         abort(404)
     return send_file(job["path"], conditional=True,
-                     as_attachment="download" in request.args, download_name="aidj-mix.wav")
+                     as_attachment="download" in request.args, download_name="miso-soup-mix.wav")
 
 
 @app.post("/api/mix/<jid>/save")
@@ -155,7 +155,7 @@ def save_mix(jid):
     if window is None:
         return jsonify(dialog=False)
     import webview
-    dest = window.create_file_dialog(webview.FileDialog.SAVE, save_filename="aidj-mix.wav",
+    dest = window.create_file_dialog(webview.FileDialog.SAVE, save_filename="miso-soup-mix.wav",
                                      file_types=("WAV (*.wav)", "MP3 (*.mp3)"))
     if not dest:
         return jsonify(saved=None)
@@ -170,7 +170,7 @@ def save_mix(jid):
 
 def main():
     global window
-    ap = argparse.ArgumentParser(description="AI DJ デスクトップアプリ")
+    ap = argparse.ArgumentParser(description="Miso Soup デスクトップアプリ")
     ap.add_argument("--browser", action="store_true", help="アプリのウィンドウではなくブラウザで開く")
     ap.add_argument("--no-open", action="store_true", help="サーバーだけ起動する（開発・テスト用）")
     ap.add_argument("--port", type=int, default=0)
@@ -183,7 +183,7 @@ def main():
     if not (args.browser or args.no_open):
         try:
             import webview
-            window = webview.create_window("AI DJ", url, width=1200, height=860, min_size=(860, 600),
+            window = webview.create_window("Miso Soup", url, width=1200, height=860, min_size=(860, 600),
                                            background_color="#0e1014")
             webview.start()
             return
@@ -193,7 +193,7 @@ def main():
     if not args.no_open:
         import webbrowser
         webbrowser.open(url)
-    print(f"AI DJ: {url} で動いています。終了は Ctrl+C", flush=True)
+    print(f"Miso Soup: {url} で動いています。終了は Ctrl+C", flush=True)
     try:
         threading.Event().wait()
     except KeyboardInterrupt:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AI DJ 試作: 曲ごとに「聴かせたい範囲」を指定して、テンポを揃えてつなぐ。
+"""Miso Soup: 曲ごとに「聴かせたい範囲」を指定して、テンポを揃えてつなぐ。
 
   python aidj.py "曲A.mp3@1:05-2:10" "曲B.mp3@0:45-1:50x2" -o mix.wav
 
@@ -572,7 +572,7 @@ def describe_transition(nxt):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="聴かせたい範囲を指定して曲をつなぐ AI DJ 試作")
+    ap = argparse.ArgumentParser(description="聴かせたい範囲を指定して曲をつなぐ Miso Soup")
     ap.add_argument("tracks", nargs="+", help='"曲.mp3@1:05-2:10" の形式。末尾に x2 でループ')
     ap.add_argument("-o", "--output", default="mix.wav")
     ap.add_argument("--bars", type=int, default=8, help="つなぎの長さ（小節）。既定 8")

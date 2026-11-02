@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """CI 用: exe をアプリのウィンドウで起動し、画面が表示されるか確かめてスクリーンショットを撮る。
 
-  python ci/screenshot.py "dist/AI DJ/AI DJ.exe"
+  python ci/screenshot.py "dist/Miso Soup/Miso Soup.exe"
 """
 import os
 import subprocess
@@ -11,7 +11,7 @@ import time
 
 from PIL import ImageGrab
 
-LOG = os.path.join(tempfile.gettempdir(), "aidj.log")
+LOG = os.path.join(tempfile.gettempdir(), "miso-soup.log")
 OUT = "ci-output"
 
 

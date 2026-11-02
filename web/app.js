@@ -428,7 +428,7 @@ async function save() {
   if (data.dialog === false) {  // ブラウザで開いているときは普通のダウンロード
     const a = document.createElement("a");
     a.href = `/api/mix/${mix.id}/audio?download=1`;
-    a.download = "aidj-mix.wav";
+    a.download = "miso-soup-mix.wav";
     a.click();
   } else if (data.saved) {
     toast(`保存しました: ${data.saved}`);
