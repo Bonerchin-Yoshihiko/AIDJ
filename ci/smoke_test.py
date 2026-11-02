@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 
+import numpy as np
 import requests
 import soundfile as sf
 
@@ -83,8 +84,9 @@ def check_wavs():
     print("いろいろな WAV: すべて OK /", r.json()["error"])
 
 
-def run_mix(items, bridge, save_as):
-    jid = requests.post(f"{URL}/api/mix", json={"items": items, "bars": 8, "bridge": bridge}).json()["id"]
+def run_mix(items, bridge, save_as, links=None):
+    body = {"items": items, "bars": 8, "bridge": bridge, "links": links}
+    jid = requests.post(f"{URL}/api/mix", json=body).json()["id"]
     t0 = time.time()
     while (job := requests.get(f"{URL}/api/mix/{jid}").json())["state"] == "running":
         if time.time() - t0 > 900:
@@ -143,6 +145,18 @@ def main():
         assert abs(br["from_bpm"] - res["bpm"]) < 1 and abs(br["to_bpm"] - 90) < 1, f"ブリッジのテンポがおかしい: {br}"
         assert br["to_key"] == "F# メジャー", f"ブリッジの行き先のキーがおかしい: {br}"
         assert res["tracks"][2]["next"]["to_bpm"] is None, "テンポ不定の曲へのブリッジがおかしい"
+
+        # 曲のパートを使ったブリッジ（AI のパート分け）
+        info = requests.get(f"{URL}/api/info").json()
+        assert info["stems"], "AI のパート分けが使えない"
+        items = [{"id": b["id"], "start": 30, "end": 45}, {"id": g["id"], "start": 42.7, "end": 85.3}]
+        link = {"a": ["drums", "vocals"], "b": ["drums", "other"], "synth": False}
+        res, y, sr = run_mix(items, "auto", "mix_stems.mp3", links=[link])
+        br = res["tracks"][0]["next"]
+        assert br["kind"] == "bridge", f"パートを選んだのにブリッジになっていない: {br}"
+        assert br["parts"] == {"a": ["drums", "vocals"], "b": ["drums", "other"]}, f"使ったパートがおかしい: {br}"
+        assert not br["synth"] and not br["missing"], f"合成音・見つからなかったパートがおかしい: {br}"
+        assert np.sqrt(np.mean(y ** 2)) > 0.01, "ミックスがほぼ無音"
         print("すべて OK")
     finally:
         proc.kill()

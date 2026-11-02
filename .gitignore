@@ -6,3 +6,4 @@ dist/
 demo/
 ci-output/
 *.wav
+models/

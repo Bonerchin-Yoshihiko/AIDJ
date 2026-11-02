@@ -190,58 +190,143 @@ def beat_grid(t_a, t_b, beats, hold):
     return np.array(times)
 
 
-def make_bridge(t_a, t_b, key_a, key_b, bars):
-    """ブリッジを合成する。t_a / t_b は前後の曲のテンポ（None = テンポ不定でビートなし）。
-
-    戻り値: (音声 (2, n), 前後それぞれのテンポ固定部分の拍数)
-    """
+def plan(t_a, t_b, bars):
+    """ブリッジのテンポと拍の時刻を決める。戻り値: (始まりのテンポ, 終わりのテンポ, 拍の時刻, 拍数, テンポ固定の拍数)"""
     beats, hold = 4 * bars, 4 * max(1, bars // 4)
-    drums_in, drums_out = t_a is not None, t_b is not None
     t_a = t_a or t_b or 100.0
     t_b = t_b or t_a
-    times = beat_grid(t_a, t_b, beats, hold)
-    length = int(round(times[-1] * SR))
+    return t_a, t_b, beat_grid(t_a, t_b, beats, hold), beats, hold
+
+
+def fade(times, k0, k1, rising, length):
+    """拍 k0〜k1 の間で 0→1（rising=False なら 1→0）に変わる、サンプルごとの音量。"""
+    i0, i1 = int(times[k0] * SR), int(times[k1] * SR)
+    g = np.full(length, 0.0 if rising else 1.0)
+    x = np.linspace(0, np.pi / 2, max(1, i1 - i0))
+    g[i0:i1] = np.sin(x) if rising else np.cos(x)
+    g[i1:] = 1.0 if rising else 0.0
+    return g
+
+
+def chop_track(chop, period, beats, side):
+    """1小節ぶんのボーカル（chop）を、ブリッジの長さの中に並べた音を作る（元の曲のテンポのまま）。
+
+    前の曲（a）: 前半に小節ごとに置き、エコーを残しながら小さくしていく
+    次の曲（b）: 後半に小節ごとに置いて大きくしていき、最後の1小節は細かく繰り返して（スタッター）盛り上げる
+    """
+    track = np.zeros((2, int(round(beats * period * SR)) + chop.shape[1]))
+    bars, mid = beats // 4, beats // 8
+    put = lambda x, beat, g: add(track, g * x, beat * period)
+    if side == "a":
+        for i, bar in enumerate(range(1, mid)):
+            g = 0.8 ** i
+            put(chop, bar * 4, g)
+            for e in (1, 2):  # エコー（3/4拍ずつ遅れて小さく）
+                put(chop, bar * 4 + 0.75 * e, g * 0.4 ** e)
+    else:
+        for i, bar in enumerate(range(mid, bars - 1)):
+            put(chop, bar * 4, 0.6 + 0.4 * i / max(1, bars - 2 - mid))
+        steps = [(s * 0.5, 0.5) for s in range(4)] + [(2 + s * 0.25, 0.25) for s in range(8)]
+        for at, step in steps:  # 最後の1小節: 頭の部分を8分 → 16分で繰り返す
+            n = int(step * period * SR)
+            piece = chop[:, :n] * np.linspace(1, 0, n) ** 0.3
+            put(piece, (bars - 1) * 4 + at, 1.0)
+    return track
+
+
+def synth_layers(times, beats, hold, chords, length, use):
+    """合成音のレイヤー（use で使うものを選ぶ: drums / bass / pad / arp / fx）。"""
     out = np.zeros((2, length + SR))
     sub = lambda k, s: times[k] + (times[k + 1] - times[k]) * s  # k 拍目の中の位置 s (0〜1)
-
-    # コード: 4つのコードをブリッジ全体に均等に割り当てる
-    chords = chord_path(key_a, key_b)
     chord_at = lambda k: chords[min(3, k * 4 // beats)]
     cutoff = 700 * (5000 / 700) ** np.linspace(0, 1, out.shape[1])  # パッドの音色をだんだん明るく
-    for i, c in enumerate(chords):
-        k0, k1 = i * beats // 4, (i + 1) * beats // 4
-        pad(out, times[k0], times[k1], voicing(c), cutoff, 0.05)
+    if "pad" in use:
+        for i, c in enumerate(chords):
+            pad(out, times[i * beats // 4], times[(i + 1) * beats // 4], voicing(c), cutoff, 0.05)
 
     k_kick, k_clap, k_hat = kick(), clap(), noise_hit(0.02, 7000)
     for k in range(beats):
         last_bar = k >= beats - 4
-        drums = (k >= hold or drums_in) and (k < beats - hold or drums_out)
-        root = chord_at(k)[0]
-        if drums and not (last_bar and drums_out):
-            add(out, 0.9 * k_kick, times[k])
-            if k % 4 in (1, 3):
-                add(out, 0.35 * k_clap, times[k])
-            add(out, 0.12 * k_hat, sub(k, 0.5))
-            add(out, 0.3 * bass(33 + (root - 33) % 12, (times[k + 1] - times[k]) * 0.45), sub(k, 0.5))
-            if hold <= k < beats - hold:  # テンポが変わっている間は16分のハイハットで勢いをつける
-                for s in (0.25, 0.75):
-                    add(out, 0.05 * k_hat, sub(k, s))
-        if hold <= k < beats - 4:  # アルペジオ（コードの音を16分で）を少しずつ大きく
+        drums = (k >= hold or use["drums_in"]) and (k < beats - hold or use["drums_out"])
+        if drums and not (last_bar and use["drums_out"]):
+            if "drums" in use:
+                add(out, 0.9 * k_kick, times[k])
+                if k % 4 in (1, 3):
+                    add(out, 0.35 * k_clap, times[k])
+                add(out, 0.12 * k_hat, sub(k, 0.5))
+                if hold <= k < beats - hold:  # テンポが変わっている間は16分のハイハットで勢いをつける
+                    for s in (0.25, 0.75):
+                        add(out, 0.05 * k_hat, sub(k, s))
+            if "bass" in use:
+                root = chord_at(k)[0]
+                add(out, 0.3 * bass(33 + (root - 33) % 12, (times[k + 1] - times[k]) * 0.45), sub(k, 0.5))
+        if "arp" in use and hold <= k < beats - 4:  # アルペジオ（コードの音を16分で）を少しずつ大きく
             tones = voicing(chord_at(k), 67) + [voicing(chord_at(k), 67)[0] + 12]
             vol = 0.03 + 0.05 * (k - hold) / max(1, beats - 4 - hold)
             for s in range(4):
                 fc = cutoff[int(sub(k, s / 4) * SR)]
                 add(out, vol * pluck(tones[(k * 4 + s) % 4], 0.3, fc, 0.4 if s % 2 else -0.4), sub(k, s / 4))
-        if last_bar and drums_out:  # 最後の1小節はスネアロールで次の曲へ
+        if "fx" in use and last_bar and use["drums_out"]:  # 最後の1小節はスネアロールで次の曲へ
             steps = 4 if k < beats - 2 else 8
             for s in range(steps):
                 pos = (k - (beats - 4) + s / steps) / 4
                 add(out, (0.1 + 0.5 * pos) * k_clap, sub(k, s / steps))
-    if drums_out:
+    if "fx" in use and use["drums_out"]:
         r = riser(times[-1] - times[beats - hold])
         add(out, 0.12 * r, times[-1] - len(r) / SR)
+    return out[:, :length]
 
-    out = out[:, :length]
-    fade = int(0.01 * SR)
-    out[:, -fade:] *= np.linspace(1, 0, fade)
-    return out.astype(np.float32), hold
+
+def make_bridge(t_a, t_b, key_a, key_b, bars, parts=None, synth=True):
+    """ブリッジを作る。t_a / t_b は前後の曲のテンポ（None = テンポ不定でビートなし）。
+
+    parts: 曲から取り出したパート {"a": {"drums": 音, ...}, "b": {...}}（音は (2, n)）。
+      a（前の曲）の音は、ブリッジの頭から始まる「曲の続き」。b（次の曲）の音は、最後が次の曲の範囲の頭に来る「曲の手前」。
+      どちらも曲のテンポのままで、ここでブリッジのテンポの変化に合わせて伸び縮みさせる。
+      "vocals" だけは、1小節ぶんを切り出した「チョップ」用の音（テンポ不定の曲なら、ほかと同じく曲の続き・手前）。
+    synth: 合成音を使うか。曲のパートと同じ種類の合成音（ドラムなど）は自動で外す。
+
+    戻り値: (音声 (2, n), 前後それぞれのテンポ固定部分の拍数)
+    """
+    from stretch import warp
+
+    parts = parts or {"a": {}, "b": {}}
+    steady = {"a": t_a is not None, "b": t_b is not None}
+    t_a, t_b, times, beats, hold = plan(t_a, t_b, bars)
+    length = int(round(times[-1] * SR))
+    mid = beats // 2
+    both = lambda name: name in parts["a"] and name in parts["b"]
+
+    song = np.zeros((2, length))
+    for side, period in (("a", 60 / t_a), ("b", 60 / t_b)):
+        for name, src in parts[side].items():
+            if steady[side]:
+                if name == "vocals":
+                    src = chop_track(src, period, beats, side)
+                x = warp(src, np.arange(beats + 1) * period, times)
+            else:  # テンポ不定の曲は伸び縮みさせずに置く（a は頭に、b は最後に合わせて）
+                x = src[:, :length] if side == "a" else src[:, -length:]
+                x = np.pad(x, ((0, 0), (0, length - x.shape[1]) if side == "a" else (length - x.shape[1], 0)))
+            if name == "drums" and not both("drums"):
+                g = np.ones(length)  # 片方の曲のドラムだけなら、ブリッジの最後まで鳴らす
+            elif name == "drums":
+                g = fade(times, mid - 2, mid + 2, side == "b", length)
+            elif side == "a":  # キーがある音（ベース・その他・ボーカル）は、前の曲は前半だけ
+                g = fade(times, mid - 4, mid, False, length)
+            else:  # 次の曲は後半だけ
+                g = fade(times, mid, mid + 4, True, length)
+            song += x * g
+
+    used = set(parts["a"]) | set(parts["b"])
+    if synth or not used:
+        use = {"drums_in": steady["a"], "drums_out": steady["b"], "pad": 1, "fx": 1}
+        use.update({name: 1 for name, part in (("drums", "drums"), ("bass", "bass"), ("arp", "other")) if part not in used})
+        synth_out = synth_layers(times, beats, hold, chord_path(key_a, key_b), length, use)
+        if used:  # 曲のパートと合わせるときは、合成音を少し控えめに
+            rms = lambda x: np.sqrt(np.mean(x ** 2)) + 1e-9
+            synth_out *= np.clip(0.8 * rms(song) / rms(synth_out), 0.2, 2.0)
+        song += synth_out
+
+    n = int(0.01 * SR)
+    song[:, -n:] *= np.linspace(1, 0, n)
+    return song.astype(np.float32), hold

@@ -5,6 +5,9 @@
   demo/house_128.wav  128 BPM・Cメジャー。17〜32小節目が「サビ」
   demo/piano_free.wav テンポが揺れるピアノ（ビートなし）
   demo/groove_90.wav  90 BPM・F#メジャー（ほかの曲とテンポもキーも離れている）。17〜32小節目が「サビ」
+
+house_128 のサビには、声っぽい音（母音の合成）も入れている。
+demo/stems/ には、AI のパート分けがどれくらい正確かを確かめるための「正解」のパートを書き出す。
 """
 import os
 
@@ -52,27 +55,45 @@ def add(buf, x, at):
         buf[i:j] += x[: j - i]
 
 
-def house(bpm, root, chords, lead, bars=48, chorus=(16, 32)):
+def voice(freq, dur):
+    """母音「あ」っぽい声（ビブラート付きのパルスを、声の共鳴（フォルマント）で色づけ）。"""
+    n = int(dur * SR)
+    t = np.arange(n) / SR
+    f0 = freq * 2 ** (0.025 * np.sin(2 * np.pi * 5.5 * t) * np.minimum(1, t / 0.3))
+    phase = np.cumsum(f0) / SR
+    src = 2 * (phase % 1) - 1 + 0.03 * rng.standard_normal(n)
+    y = np.zeros(n)
+    for fc, bw, g in ((800, 80, 1.0), (1150, 90, 0.6), (2900, 120, 0.25)):
+        y += g * sosfilt(butter(2, [fc - bw, fc + bw], btype="bandpass", fs=SR, output="sos"), src)
+    return y * np.minimum(1, t / 0.05) * np.clip((dur - t) / 0.1, 0, 1)
+
+
+def house(bpm, root, chords, lead, bars=48, chorus=(16, 32), vocal=None):
+    """パートごと（ドラム・ベース・その他・声）の音を返す。曲はこれを足したもの。"""
     beat = 60 / bpm
-    out = np.zeros(int((bars * 4 + 4) * beat * SR))
+    n = int((bars * 4 + 4) * beat * SR)
+    parts = {name: np.zeros(n) for name in ("drums", "bass", "other", "vocals")}
     k, clap, hat = kick(), noise_hit(0.05, [900, 3000]), noise_hit(0.015, [7000])
     for bar in range(bars):
         in_chorus = chorus[0] <= bar < chorus[1]
         ch = chords[(bar // 2) % len(chords)]
         for b in range(4):
             t = (bar * 4 + b) * beat
-            add(out, 0.9 * k, t)
-            add(out, 0.25 * hat, t + beat / 2)
+            add(parts["drums"], 0.9 * k, t)
+            add(parts["drums"], 0.25 * hat, t + beat / 2)
             if b in (1, 3):
-                add(out, 0.35 * clap, t)
-            add(out, 0.35 * tone(midi(root + ch[0] - 12), beat * 0.45, harmonics=(1, 0.6, 0.3, 0.15)), t + beat / 2)
+                add(parts["drums"], 0.35 * clap, t)
+            add(parts["bass"], 0.35 * tone(midi(root + ch[0] - 12), beat * 0.45, harmonics=(1, 0.6, 0.3, 0.15)), t + beat / 2)
         if bar >= 8:  # 9小節目からコード
             for m in ch:
-                add(out, 0.08 * tone(midi(root + m + 12), beat * 4, harmonics=(1, 0.3)), bar * 4 * beat)
+                add(parts["other"], 0.08 * tone(midi(root + m + 12), beat * 4, harmonics=(1, 0.3)), bar * 4 * beat)
         if in_chorus:  # サビだけリード
             for i, m in enumerate(lead[(bar % 2) * 4:(bar % 2) * 4 + 4]):
-                add(out, 0.12 * tone(midi(root + m + 24), beat * 0.9, decay=0.3), (bar * 4 + i) * beat)
-    return out
+                add(parts["other"], 0.12 * tone(midi(root + m + 24), beat * 0.9, decay=0.3), (bar * 4 + i) * beat)
+            if vocal:  # サビの声は2拍ずつ
+                for i, m in enumerate(vocal[(bar % 2) * 2:(bar % 2) * 2 + 2]):
+                    add(parts["vocals"], 0.6 * voice(midi(root + m + 12), beat * 1.9), (bar * 4 + i * 2) * beat)
+    return parts
 
 
 def free_piano(seconds=70):
@@ -89,16 +110,24 @@ def free_piano(seconds=70):
     return out
 
 
-def save(name, mono):
-    stereo = np.stack([mono, np.roll(mono, 40)], axis=1)  # ほんの少しだけ左右差
-    stereo /= np.max(np.abs(stereo)) * 1.1
-    sf.write(os.path.join("demo", name), stereo, SR)
+def save(name, mono, parts=None):
+    stereo = lambda x: np.stack([x, np.roll(x, 40)], axis=1)  # ほんの少しだけ左右差
+    scale = 1 / (np.max(np.abs(stereo(mono))) * 1.1)
+    sf.write(os.path.join("demo", name), stereo(mono) * scale, SR)
     print(f"demo/{name}  {len(mono) / SR:.1f}秒")
+    for part, x in (parts or {}).items():
+        os.makedirs(os.path.join("demo", "stems"), exist_ok=True)
+        sf.write(os.path.join("demo", "stems", name.replace(".wav", f"_{part}.wav")), stereo(x) * scale, SR)
+
+
+def save_parts(name, parts):
+    save(name, sum(parts.values()), {k: v for k, v in parts.items() if v.any()})
 
 
 if __name__ == "__main__":
     os.makedirs("demo", exist_ok=True)
-    save("house_124.wav", house(124, 57, [[0, 3, 7], [-4, 0, 3], [-2, 2, 5], [-5, -2, 2]], [0, 3, 7, 10, 12, 10, 7, 3]))
-    save("house_128.wav", house(128, 60, [[0, 4, 7], [-3, 0, 4], [-7, -3, 0], [-5, -1, 2]], [12, 11, 7, 4, 5, 7, 11, 12]))
+    save_parts("house_124.wav", house(124, 57, [[0, 3, 7], [-4, 0, 3], [-2, 2, 5], [-5, -2, 2]], [0, 3, 7, 10, 12, 10, 7, 3]))
+    save_parts("house_128.wav", house(128, 60, [[0, 4, 7], [-3, 0, 4], [-7, -3, 0], [-5, -1, 2]], [12, 11, 7, 4, 5, 7, 11, 12],
+                                      vocal=[4, 2, 0, 7]))
     save("piano_free.wav", free_piano())
-    save("groove_90.wav", house(90, 54, [[0, 4, 7], [5, 9, 12], [-3, 0, 4], [7, 11, 14]], [7, 9, 11, 12, 11, 9, 7, 4], bars=40))
+    save_parts("groove_90.wav", house(90, 54, [[0, 4, 7], [5, 9, 12], [-3, 0, 4], [7, 11, 14]], [7, 9, 11, 12, 11, 9, 7, 4], bars=40))

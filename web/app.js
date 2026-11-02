@@ -11,8 +11,14 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const setlist = $("#setlist");
 const mixBtn = $("#mixBtn");
 
+const PARTS = [["drums", "ドラム"], ["bass", "ベース"], ["vocals", "ボーカル"], ["other", "その他"]];
+const PART_NAME = Object.fromEntries(PARTS);
+
 const tracks = [];   // セットリスト（並び順どおり）
+const links = new Map();  // 曲と曲の間のブリッジの素材（「前の曲の番号-次の曲の番号」ごと）
+let stemsAvailable = false;  // AI のパート分けが使えるか
 let nextColor = 0;
+let nextUid = 0;
 let version = 0;     // 何か変更するたびに増える。ミックス結果が古いかどうかの判定に使う
 let mix = null;      // 最後のミックス { id, result, ws, version }
 let mixing = false;
@@ -58,7 +64,11 @@ function transitionText(next) {
     return (b % 4 === 0 ? `${b / 4}小節` : `${b}拍`) + "のクロスフェード（ベーススワップ）";
   }
   const tempo = t => (t ? `${Math.round(t)} BPM` : "テンポなし");
-  return `${next.bars}小節のブリッジを生成（${tempo(next.from_bpm)} → ${tempo(next.to_bpm)}、${next.from_key} → ${next.to_key}）`;
+  const names = [...next.parts.a.map(p => `前の${PART_NAME[p]}`), ...next.parts.b.map(p => `次の${PART_NAME[p]}`)];
+  if (next.synth) names.push("合成音");
+  let text = `${next.bars}小節のブリッジを生成（${tempo(next.from_bpm)} → ${tempo(next.to_bpm)}、${next.from_key} → ${next.to_key}／${names.join("・")}）`;
+  if (next.missing.length) text += ` ※${next.missing.join("・")}は声が見つからず使っていません`;
+  return text;
 }
 
 function stopAll(except) {
@@ -71,7 +81,7 @@ const isFresh = () => mix && mix.version === version;
 // ---------- セットリスト
 
 function createTrack(props) {
-  const t = { loops: 1, loading: true, color: COLORS[nextColor++ % COLORS.length], ...props };
+  const t = { uid: ++nextUid, loops: 1, loading: true, color: COLORS[nextColor++ % COLORS.length], ...props };
   t.el = $("#track-tpl").content.firstElementChild.cloneNode(true);
   t.el.style.setProperty("--c", t.color);
   const q = sel => $(sel, t.el);
@@ -213,17 +223,82 @@ function changed() {
   render();
 }
 
+// ---------- 曲と曲の間（つなぎ）とブリッジの素材
+
+function linkState(a, b) {
+  const key = `${a.uid}-${b.uid}`;
+  if (!links.has(key)) links.set(key, { a: new Set(), b: new Set(), synth: true, open: false });
+  return links.get(key);
+}
+
+function linkRequest(a, b) {
+  const s = linkState(a, b);
+  return { a: [...s.a], b: [...s.b], synth: s.synth };
+}
+
+function renderLink(a, b, text, fresh) {
+  const s = linkState(a, b);
+  const chosen = s.a.size + s.b.size > 0;
+  const link = document.createElement("div");
+  link.className = "link" + (fresh ? " done" : "");
+  link.style.setProperty("--from", a.color);
+  link.style.setProperty("--to", b.color);
+  const body = document.createElement("div");
+  body.className = "link-body";
+  const label = document.createElement("span");
+  label.textContent = text;
+  const toggle = document.createElement("button");
+  toggle.className = "link-toggle";
+  toggle.setAttribute("aria-expanded", String(s.open));
+  const summary = [...[...s.a].map(p => `前の${PART_NAME[p]}`), ...[...s.b].map(p => `次の${PART_NAME[p]}`)];
+  toggle.textContent = `ブリッジの素材${chosen ? `: ${summary.join("・")}${s.synth ? "・合成音" : ""}` : ""} ${s.open ? "▾" : "▸"}`;
+  toggle.onclick = () => { s.open = !s.open; render(); };
+  body.append(label, toggle);
+
+  if (s.open) {
+    const parts = document.createElement("div");
+    parts.className = "parts";
+    const group = (title, side, color) => {
+      const g = document.createElement("span");
+      g.className = "part-group";
+      g.style.setProperty("--c", color);
+      g.append(Object.assign(document.createElement("span"), { className: "group-label", textContent: title }));
+      for (const [part, name] of PARTS) {
+        const chip = document.createElement("button");
+        chip.className = "chip";
+        chip.textContent = name;
+        chip.disabled = !stemsAvailable;
+        chip.title = stemsAvailable ? "" : "AI のパート分けが使えません";
+        chip.setAttribute("aria-pressed", String(s[side].has(part)));
+        chip.onclick = () => { s[side].has(part) ? s[side].delete(part) : s[side].add(part); changed(); };
+        g.append(chip);
+      }
+      return g;
+    };
+    const synth = document.createElement("button");
+    synth.className = "chip synth";
+    synth.textContent = "合成音";
+    synth.setAttribute("aria-pressed", String(s.synth));
+    synth.onclick = () => { s.synth = !s.synth; changed(); };
+    const note = document.createElement("span");
+    note.className = "parts-note";
+    note.textContent = stemsAvailable
+      ? "パートを選ぶと、ここには必ずブリッジが入ります（AI のパート分けに数十秒かかります）"
+      : "AI のパート分けが使えないため、合成音だけになります";
+    parts.append(group("前の曲", "a", a.color), group("次の曲", "b", b.color), synth, note);
+    body.append(parts);
+  }
+  link.append(body);
+  return link;
+}
+
 function render() {
   const fresh = isFresh();
   const nodes = [];
   tracks.forEach((t, i) => {
     if (i > 0) {
-      const link = document.createElement("div");
-      link.className = "link" + (fresh ? " done" : "");
-      link.style.setProperty("--from", tracks[i - 1].color);
-      link.style.setProperty("--to", t.color);
-      link.textContent = fresh ? transitionText(mix.result.tracks[i - 1].next) : "つなぎ";
-      nodes.push(link);
+      const text = fresh ? transitionText(mix.result.tracks[i - 1].next) : "つなぎ";
+      nodes.push(renderLink(tracks[i - 1], t, text, fresh));
     }
     $(".num", t.el).textContent = i + 1;
     $(".up", t.el).disabled = t.loading || i === 0;
@@ -277,6 +352,7 @@ async function startMix() {
     bpm: parseFloat($("#bpm").value) || null,
     max_stretch: Number($("#maxStretch").value),
     bridge: $("#bridge").value,
+    links: tracks.slice(1).map((t, i) => linkRequest(tracks[i], t)),
   };
   render();
   $("#deck").hidden = false;
@@ -382,4 +458,5 @@ window.addEventListener("keydown", e => {  // スペースでミックスを再�
   mix.ws.playPause();
 });
 
+fetch("/api/info").then(r => r.json()).then(info => { stemsAvailable = info.stems; render(); }).catch(() => {});
 render();

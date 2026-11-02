@@ -17,11 +17,8 @@ import argparse
 import math
 import os
 import re
-import shutil
 import struct
-import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass
 
 import librosa
@@ -30,6 +27,8 @@ import soundfile as sf
 from scipy.signal import butter, sosfiltfilt
 
 import bridge
+import separate
+from stretch import stretch
 
 SR = 44100
 STEADY_JITTER = 0.03  # 拍の位置のばらつき（秒）がこれ以下なら「テンポが一定」とみなす
@@ -306,35 +305,6 @@ def choose_tempo(tracks, bpm, max_stretch):
     return max(folded + [float(np.median(folded))], key=score)
 
 
-def rubberband(y, speed):
-    """rubberband（高音質なテンポ調整ツール）で伸び縮みさせる。見つからなければ None。"""
-    exe = shutil.which("rubberband")
-    if not exe:
-        return None
-    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0  # Windows で黒い窓が一瞬出ないように
-    with tempfile.TemporaryDirectory() as d:
-        src, dst = os.path.join(d, "in.wav"), os.path.join(d, "out.wav")
-        sf.write(src, y.T, SR, subtype="FLOAT")
-        for engine in (["--fine"], []):  # --fine は v3 以降。古い版なら付けずにやり直す
-            try:
-                subprocess.run([exe, "-q", *engine, "--tempo", str(speed), src, dst],
-                               check=True, capture_output=True, creationflags=flags)
-                return sf.read(dst, dtype="float32", always_2d=True)[0].T
-            except (OSError, subprocess.CalledProcessError):
-                continue
-    return None
-
-
-def stretch(y, speed):
-    if abs(speed - 1) < 1e-4:
-        return y
-    out = rubberband(y, speed)
-    if out is None:
-        # rubberband がなければ librosa で代用（音質は少し落ちる）
-        out = librosa.effects.time_stretch(y, rate=speed)
-    return out
-
-
 def loop(y, rs, re_, n):
     """範囲 [rs, re_) を n 回くり返す。後ろの余白はそのまま残す。"""
     body = y[:, rs:re_]
@@ -398,12 +368,66 @@ def short_fade(x, n, out):
         x[:, :n] *= w
 
 
-def bridge_clip(a, b, bars):
-    """曲 a と b の間に入れるブリッジを作る。重ねられる長さ（サンプル数）も返す。"""
+def take(x, lo, hi, anchor, bar):
+    """x[:, lo:hi] を取り出す。曲の外にはみ出す部分は、anchor とそろう小節をくり返して埋める（拍がずれないように）。"""
+    n = x.shape[1]
+    first = anchor - (anchor // bar) * bar
+    last = anchor + ((n - anchor) // bar) * bar
+    idx = np.arange(lo, hi)
+    idx = np.where(idx < first, first + (idx - first) % bar, idx)
+    idx = np.where(idx >= last, last - bar + (idx - last) % bar, idx)
+    return x[:, np.clip(idx, 0, n - 1)]
+
+
+def song_parts(c, side, names, steady, period, beats, seconds, report):
+    """曲 c を AI でパートに分けて、ブリッジ用の素材を切り出す。
+
+    前の曲（a）は範囲の続き、次の曲（b）は範囲の手前を使う（ブリッジに必要な長さぶん、曲のテンポで）。
+    ボーカルは、範囲の端の4小節のうち一番声が大きい1小節を「チョップ」用に取り出す。
+    """
+    bar = int(round(4 * period * SR))
+    n = int(round((beats * period if steady else seconds) * SR))
+    anchor = c.re if side == "a" else c.rs
+    lo, hi = (anchor - 4 * bar, anchor + n) if side == "a" else (anchor - n, anchor + 4 * bar)
+    report(f"AI でパートを分けています（{'前' if side == 'a' else '次'}の曲・{(hi - lo) / SR:.0f}秒ぶん）")
+    stems = separate.separate(take(c.audio, lo, hi, anchor, bar))
+    out, missing = {}, []
+    for name in names:
+        x = stems[name] * c.gain
+        edge, body = (x[:, :4 * bar], x[:, 4 * bar:]) if side == "a" else (x[:, -4 * bar:], x[:, :-4 * bar])
+        if name == "vocals" and steady:
+            level = [np.sqrt(np.mean(edge[:, i * bar:(i + 1) * bar] ** 2)) for i in range(4)]
+            if max(level) < 0.003:  # ほぼ無音なら、声は入っていないとみなす
+                missing.append(name)
+                continue
+            best = int(np.argmax(level))
+            out[name] = edge[:, best * bar:(best + 1) * bar]
+        else:
+            out[name] = body
+    return out, missing
+
+
+def bridge_clip(a, b, bars, link=None, report=lambda msg: None):
+    """曲 a と b の間に入れるブリッジを作る。重ねられる長さ（サンプル数）も返す。
+
+    link: {"a": [前の曲のパート], "b": [次の曲のパート], "synth": 合成音を使うか}
+    """
+    link = link or {}
     # ビート検出が倍・半分のテンポを拾うことがあるので、ブリッジは 80〜160 BPM の範囲で鳴らす
     t_a = bridge.musical_tempo(60 * SR / a.beat) if a.steady else None
     t_b = bridge.musical_tempo(60 * SR / b.beat) if b.steady else None
-    audio, hold = bridge.make_bridge(t_a, t_b, a.key, b.key, bars)
+    start_bpm, end_bpm, times, beats, _ = bridge.plan(t_a, t_b, bars)
+    parts, missing = {"a": {}, "b": {}}, []
+    if link.get("a") or link.get("b"):
+        if not separate.available():
+            raise MixError("AI のパート分けが使えません（モデルが見つかりません）。つなぎの素材を「合成音」だけにしてください")
+        for side, c, tempo, bpm_ in (("a", a, t_a, start_bpm), ("b", b, t_b, end_bpm)):
+            if link.get(side):
+                parts[side], miss = song_parts(c, side, link[side], tempo is not None, 60 / bpm_, beats, times[-1], report)
+                missing += [(side, m) for m in miss]
+    synth = link.get("synth", True)
+    audio, hold = bridge.make_bridge(t_a, t_b, a.key, b.key, bars, parts, synth)
+
     n_a = n_b = 0
     beat_a = int(round(60 / t_a * SR)) if t_a else 0
     beat_b = int(round(60 / t_b * SR)) if t_b else 0
@@ -413,7 +437,9 @@ def bridge_clip(a, b, bars):
         n_b = min(hold * beat_b, b.rs) // beat_b * beat_b
     clip = Clip(audio, n_a, audio.shape[1] - n_b, beat_b or beat_a or int(0.5 * SR), True, echo=False)
     info = {"bars": bars, "from_bpm": t_a, "to_bpm": t_b,
-            "from_key": bridge.key_name(a.key), "to_key": bridge.key_name(b.key)}
+            "from_key": bridge.key_name(a.key), "to_key": bridge.key_name(b.key),
+            "parts": {"a": list(parts["a"]), "b": list(parts["b"])}, "synth": bool(synth or not (parts["a"] or parts["b"])),
+            "missing": [f"{'前' if side == 'a' else '次'}の曲の{separate.PART_NAMES[m]}" for side, m in missing]}
     return clip, (n_a, beat_a or clip.beat), (n_b, clip.beat), info
 
 
@@ -456,10 +482,12 @@ def build_mix(items, joins, tail):
     return out, spans
 
 
-def make_mix(specs, output, bars=8, bpm=None, max_stretch=0.15, bridges="auto", progress=None):
+def make_mix(specs, output, bars=8, bpm=None, max_stretch=0.15, bridges="auto", links=None, progress=None):
     """specs を順につないで output に書き出し、どう組んだかを dict で返す。
 
     bridges: "auto" = テンポかキーが合わないときだけブリッジを入れる、"always" = いつも、"off" = 入れない
+    links: 曲と曲の間ごとのブリッジの素材 [{"a": [パート], "b": [パート], "synth": bool}, ...]。
+      パートを選んだところには、bridges の設定に関係なくブリッジを入れる。
     """
     report = progress or (lambda frac, msg: None)
     n = len(specs)
@@ -474,7 +502,7 @@ def make_mix(specs, output, bars=8, bpm=None, max_stretch=0.15, bridges="auto", 
     clips, speeds = [], []
     for i, t in enumerate(tracks):
         report(0.4 + 0.4 * i / n, f"テンポ調整中 ({i + 1}/{n}) {t.spec.label}")
-        c, sp = prepare(t, bpm, max_stretch, want / SR)
+        c, sp = prepare(t, bpm, max_stretch, 2 * want / SR)  # ブリッジの素材用に、前後を長めに取っておく
         clips.append(c)
         speeds.append(sp)
     rms = [np.sqrt(np.mean(c.audio[:, c.rs:c.re] ** 2)) + 1e-9 for c in clips]
@@ -489,9 +517,12 @@ def make_mix(specs, output, bars=8, bpm=None, max_stretch=0.15, bridges="auto", 
             beats = min(a.audio.shape[1] - a.re, b.rs, want) // beat
             beats = beats - beats % 4 if beats >= 4 else beats  # できるだけ小節単位で
         clash = bridge.key_distance(a.key, b.key) >= KEY_CLASH
-        if bridges == "always" or (bridges == "auto" and (beats == 0 or clash)):
-            report(0.8 + 0.1 * i / n, f"ブリッジを生成中 ({i + 1}→{i + 2})")
-            br, join_a, join_b, info = bridge_clip(a, b, max(4, bars))
+        link = (links or [])[i] if i < len(links or []) else None
+        chosen = bool(link and (link.get("a") or link.get("b")))
+        if chosen or bridges == "always" or (bridges == "auto" and (beats == 0 or clash)):
+            frac = 0.8 + 0.1 * i / n
+            report(frac, f"ブリッジを生成中 ({i + 1}→{i + 2})")
+            br, join_a, join_b, info = bridge_clip(a, b, max(4, bars), link, lambda msg: report(frac, f"{msg} ({i + 1}→{i + 2})"))
             br.gain = float(np.clip(level / (np.sqrt(np.mean(br.audio ** 2)) + 1e-9), 0.25, 4))
             items += [br, b]
             joins += [join_a, join_b]
@@ -533,8 +564,11 @@ def describe_transition(nxt):
         beats = nxt["beats"]
         return (f"{beats // 4}小節" if beats % 4 == 0 else f"{beats}拍") + "のクロスフェード（ベーススワップ）"
     tempo = lambda t: f"{t:.0f} BPM" if t else "テンポなし"
-    return (f"{nxt['bars']}小節のブリッジを生成（{tempo(nxt['from_bpm'])} → {tempo(nxt['to_bpm'])}、"
-            f"{nxt['from_key']} → {nxt['to_key']}）")
+    names = [f"{'前' if side == 'a' else '次'}の曲の{separate.PART_NAMES[p]}" for side in "ab" for p in nxt["parts"][side]]
+    names += ["合成音"] if nxt["synth"] else []
+    text = (f"{nxt['bars']}小節のブリッジを生成（{tempo(nxt['from_bpm'])} → {tempo(nxt['to_bpm'])}、"
+            f"{nxt['from_key']} → {nxt['to_key']}／素材: {'・'.join(names)}）")
+    return text + (f" ※{'・'.join(nxt['missing'])}は声が見つからず使っていません" if nxt["missing"] else "")
 
 
 def main():
@@ -547,11 +581,24 @@ def main():
                     help="テンポを変えてよい最大の割合。既定 0.15 (=±15%%)")
     ap.add_argument("--bridge", choices=["auto", "always", "off"], default="auto",
                     help="曲の間につなぎのビートを生成する: auto=テンポかキーが合わないとき（既定）, always=いつも, off=しない")
+    ap.add_argument("--bridge-parts", default="",
+                    help="ブリッジに使う曲のパート（すべてのつなぎに使う）。例: a:drums,b:vocals,nosynth "
+                         "（a=前の曲 b=次の曲、drums/bass/vocals/other、nosynth=合成音なし）")
     args = ap.parse_args()
 
+    link = {"a": [], "b": [], "synth": True}
+    for token in filter(None, args.bridge_parts.split(",")):
+        if token == "nosynth":
+            link["synth"] = False
+        elif token[:2] in ("a:", "b:") and token[2:] in separate.PARTS:
+            link[token[0]].append(token[2:])
+        else:
+            sys.exit(f"--bridge-parts の書き方が違います: {token}")
+
     try:
-        result = make_mix([parse_spec(s) for s in args.tracks], args.output, args.bars, args.bpm,
-                          args.max_stretch, args.bridge, progress=lambda frac, msg: print(msg))
+        specs = [parse_spec(s) for s in args.tracks]
+        result = make_mix(specs, args.output, args.bars, args.bpm, args.max_stretch, args.bridge,
+                          [link] * (len(specs) - 1), progress=lambda frac, msg: print(msg))
     except MixError as e:
         sys.exit(str(e))
 

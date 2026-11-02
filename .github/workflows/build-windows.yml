@@ -30,6 +30,20 @@ jobs:
       - name: ライブラリを入れる
         run: pip install -r requirements.txt pyinstaller requests pillow
 
+      - name: AI のパート分け（PyTorch・Demucs）を入れる
+        run: |
+          pip install -r requirements-ai.txt
+          pip install --no-deps demucs==4.1.0
+
+      - name: AI のモデル（htdemucs）をダウンロード
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force models | Out-Null
+          Invoke-WebRequest https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/955717e8-8726e21a.th -OutFile models/htdemucs.th
+          $hash = (Get-FileHash models/htdemucs.th -Algorithm SHA256).Hash.ToLower()
+          if (-not $hash.StartsWith("8726e21a")) { throw "モデルのファイルが壊れています: $hash" }
+          Get-Item models/htdemucs.th
+
       - name: exe を作る
         run: python build.py
 
@@ -47,6 +61,16 @@ jobs:
 
       - name: デモ曲を作る
         run: python make_demo.py
+
+      - name: AI のパート分けの精度を測る
+        run: python ci/separation_test.py
+
+      - name: アプリの大きさ
+        shell: pwsh
+        run: |
+          $size = (Get-ChildItem -Recurse "dist/AI DJ" | Measure-Object -Property Length -Sum).Sum / 1MB
+          "dist/AI DJ: {0:N0} MB" -f $size
+          Get-ChildItem "dist/AI DJ/_internal" -Directory | ForEach-Object { "{0,8:N0} MB  {1}" -f ((Get-ChildItem -Recurse $_.FullName | Measure-Object -Property Length -Sum).Sum / 1MB), $_.Name } | Sort-Object -Descending | Select-Object -First 8
 
       - name: 動作テスト（exe で曲の読み込み → ミックス → 書き出し）
         run: python ci/smoke_test.py "dist/AI DJ/AI DJ.exe"

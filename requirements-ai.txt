@@ -1,0 +1,5 @@
+# AI のパート分け（Demucs）に使う。demucs 本体は依存を入れずに: pip install --no-deps demucs==4.1.0
+torch
+einops
+julius
+tqdm
