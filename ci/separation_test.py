@@ -31,6 +31,8 @@ def main():
         scores[part] = sdr(ref, stems[part])
         print(f"  {separate.PART_NAMES[part]:4s}: SDR {scores[part]:5.1f} dB")
     assert scores["drums"] > 3 and scores["bass"] > 0, "パート分けの精度が低すぎる（モデルが正しく読み込めていない？）"
+    # テスト用の声は音声合成なので、AI が声と認識できるとは限らない（結果を表示するだけ）
+    print("  声の分離:", "できている" if scores["vocals"] > 3 else "できていない（テスト用の声を声と認識していない）")
     print("パート分け OK")
 
 
