@@ -29,10 +29,13 @@ import numpy as np
 import soundfile as sf
 from scipy.signal import butter, sosfiltfilt
 
+import bridge
+
 SR = 44100
 STEADY_JITTER = 0.03  # 拍の位置のばらつき（秒）がこれ以下なら「テンポが一定」とみなす
 LOW_SOS = butter(4, 180, btype="lowpass", fs=SR, output="sos")  # ベーススワップの境目
 ECHO_SOS = butter(2, 300, btype="highpass", fs=SR, output="sos")  # エコーに低音を残さない
+KEY_CLASH = 3  # 五度圏でこれ以上離れたキー同士は「合わない」とみなす（C と A は 3、C と F# は 6）
 SPEC_RE = re.compile(r"^(?P<path>.+)@(?P<start>[\d:.]*)-(?P<end>[\d:.]*)(?:x(?P<loops>\d+))?$")
 
 
@@ -69,7 +72,10 @@ class Clip:
     re: int                # 範囲の終了サンプル
     beat: int              # この曲の1拍のサンプル数（テンポ調整後）
     matched: bool          # ミックスのテンポに揃っているか
+    steady: bool = True    # テンポが一定か（False = ビートに合わせられない）
+    key: tuple = (0, "major")
     gain: float = 1.0
+    echo: bool = True      # 次とつなげないとき、最後をエコーで残すか
 
 
 def parse_time(s):
@@ -203,6 +209,12 @@ def suggest_range(mono, beats, bars=16):
     return start, min(dur, start + length)
 
 
+def estimate_key(mono):
+    """キーを推定する。キックやベースの低い音につられないよう、C3（約130Hz）より上だけを見る。"""
+    chroma = librosa.feature.chroma_cens(y=mono, sr=SR, hop_length=4096, fmin=librosa.note_to_hz("C3"), n_octaves=5)
+    return bridge.estimate_key(chroma.mean(axis=1))
+
+
 def overview(path, y=None):
     """アプリで曲を読み込んだときの情報（長さ・波形・おおよそのBPM・おすすめ範囲）。"""
     y = load(path) if y is None else y
@@ -216,6 +228,7 @@ def overview(path, y=None):
         "peaks": peaks_of(mono),
         "bpm": round(bpm, 1) if bpm else None,
         "steady": grid is not None and grid[2] <= STEADY_JITTER,
+        "key": bridge.key_name(estimate_key(mono)),
         "suggested": [start, end],
     }
 
@@ -350,7 +363,8 @@ def prepare(t, bpm, max_stretch, need):
     if t.spec.loops > 1:
         y, re_ = loop(y, rs, re_, t.spec.loops)
     beat = int(round((t.period or 0.5) / speed * SR))
-    return Clip(y, rs, re_, beat, matched), speed
+    key = estimate_key(librosa.to_mono(y[:, rs:re_]))
+    return Clip(y, rs, re_, beat, matched, steady=t.period is not None, key=key), speed
 
 
 def crossfade_gains(n, beat):
@@ -384,47 +398,69 @@ def short_fade(x, n, out):
         x[:, :n] *= w
 
 
-def build_mix(clips, beat, bars):
-    """各曲を並べる。範囲内には手を加えず、範囲の外側の余白同士を重ねてつなぐ。"""
-    want = bars * 4 * beat
-    pre, post, kinds = [0] * len(clips), [0] * len(clips), []
-    for i, (a, b) in enumerate(zip(clips, clips[1:])):
-        n = 0
-        if a.matched and b.matched:
-            beats = min(a.audio.shape[1] - a.re, b.rs, want) // beat
-            n = (beats - beats % 4 if beats >= 4 else beats) * beat  # できるだけ小節単位で
-        post[i] = pre[i + 1] = n
-        kinds.append(n // beat)
-    post[-1] = min(clips[-1].audio.shape[1] - clips[-1].re, want)
+def bridge_clip(a, b, bars):
+    """曲 a と b の間に入れるブリッジを作る。重ねられる長さ（サンプル数）も返す。"""
+    # ビート検出が倍・半分のテンポを拾うことがあるので、ブリッジは 80〜160 BPM の範囲で鳴らす
+    t_a = bridge.musical_tempo(60 * SR / a.beat) if a.steady else None
+    t_b = bridge.musical_tempo(60 * SR / b.beat) if b.steady else None
+    audio, hold = bridge.make_bridge(t_a, t_b, a.key, b.key, bars)
+    n_a = n_b = 0
+    beat_a = int(round(60 / t_a * SR)) if t_a else 0
+    beat_b = int(round(60 / t_b * SR)) if t_b else 0
+    if t_a:  # ブリッジの頭は a のテンポなので、a の後ろの余白と重ねられる
+        n_a = min(hold * beat_a, a.audio.shape[1] - a.re) // beat_a * beat_a
+    if t_b:
+        n_b = min(hold * beat_b, b.rs) // beat_b * beat_b
+    clip = Clip(audio, n_a, audio.shape[1] - n_b, beat_b or beat_a or int(0.5 * SR), True, echo=False)
+    info = {"bars": bars, "from_bpm": t_a, "to_bpm": t_b,
+            "from_key": bridge.key_name(a.key), "to_key": bridge.key_name(b.key)}
+    return clip, (n_a, beat_a or clip.beat), (n_b, clip.beat), info
 
-    pieces, offset, starts = [], -clips[0].rs, []
-    for i, c in enumerate(clips):
+
+def build_mix(items, joins, tail):
+    """items を順に並べる。範囲内には手を加えず、範囲の外側の余白同士を重ねてつなぐ。
+
+    joins[i] は items[i] と items[i+1] のつなぎ方 (重ねるサンプル数, 1拍のサンプル数)。
+    重ねる長さが 0 なら、前をエコーアウトさせて切り替える。
+    """
+    pre, post = [0] * len(items), [0] * len(items)
+    for i, (n, _) in enumerate(joins):
+        post[i] = pre[i + 1] = n
+    last = items[-1]
+    post[-1] = min(last.audio.shape[1] - last.re, tail)
+
+    pieces, offset, spans = [], -items[0].rs, []
+    for i, c in enumerate(items):
         lo, hi = c.rs - pre[i], c.re + post[i]
         x = c.audio[:, lo:hi] * c.gain
         if pre[i]:
-            _, g_hi, _, g_lo = crossfade_gains(pre[i], beat)
+            _, g_hi, _, g_lo = crossfade_gains(pre[i], joins[i - 1][1])
             x[:, :pre[i]] = apply_gains(x[:, :pre[i]], g_hi, g_lo)
         else:
             short_fade(x, int(0.005 * SR), out=False)
         if post[i]:
-            g_hi, _, g_lo, _ = crossfade_gains(post[i], beat)
+            g_hi, _, g_lo, _ = crossfade_gains(post[i], joins[i][1] if i < len(joins) else c.beat)
             x[:, -post[i]:] = apply_gains(x[:, -post[i]:], g_hi, g_lo)
         else:
             short_fade(x, int(0.01 * SR), out=True)
-            pieces.append((offset + c.re, echo_tail(c)))
+            if c.echo:
+                pieces.append((offset + c.re, echo_tail(c)))
         pieces.append((offset + lo, x))
-        starts.append(((offset + c.rs) / SR, (offset + c.re) / SR))
-        if i + 1 < len(clips):
-            offset += c.re + post[i] - clips[i + 1].rs
+        spans.append(((offset + c.rs) / SR, (offset + c.re) / SR))
+        if i + 1 < len(items):
+            offset += c.re + post[i] - items[i + 1].rs
 
     out = np.zeros((2, max(p + x.shape[1] for p, x in pieces)))
     for p, x in pieces:
         out[:, p:p + x.shape[1]] += x
-    return out, starts, kinds
+    return out, spans
 
 
-def make_mix(specs, output, bars=8, bpm=None, max_stretch=0.15, progress=None):
-    """specs を順につないで output に書き出し、どう組んだかを dict で返す。"""
+def make_mix(specs, output, bars=8, bpm=None, max_stretch=0.15, bridges="auto", progress=None):
+    """specs を順につないで output に書き出し、どう組んだかを dict で返す。
+
+    bridges: "auto" = テンポかキーが合わないときだけブリッジを入れる、"always" = いつも、"off" = 入れない
+    """
     report = progress or (lambda frac, msg: None)
     n = len(specs)
     tracks = []
@@ -433,44 +469,72 @@ def make_mix(specs, output, bars=8, bpm=None, max_stretch=0.15, progress=None):
         tracks.append(analyze(s, margin=bars * 4 * 0.6 + 2))
     bpm = choose_tempo(tracks, bpm, max_stretch)
     beat = int(round(60 / bpm * SR)) if bpm else int(0.5 * SR)
-    need = bars * 4 * beat / SR
+    want = bars * 4 * beat
 
     clips, speeds = [], []
     for i, t in enumerate(tracks):
-        report(0.4 + 0.45 * i / n, f"テンポ調整中 ({i + 1}/{n}) {t.spec.label}")
-        c, sp = prepare(t, bpm, max_stretch, need)
+        report(0.4 + 0.4 * i / n, f"テンポ調整中 ({i + 1}/{n}) {t.spec.label}")
+        c, sp = prepare(t, bpm, max_stretch, want / SR)
         clips.append(c)
         speeds.append(sp)
     rms = [np.sqrt(np.mean(c.audio[:, c.rs:c.re] ** 2)) + 1e-9 for c in clips]
+    level = np.median(rms)
     for c, r in zip(clips, rms):  # 曲ごとの音量差をならす
-        c.gain = float(np.clip(np.median(rms) / r, 0.25, 4))
+        c.gain = float(np.clip(level / r, 0.25, 4))
+
+    items, joins, nexts = [clips[0]], [], []
+    for i, (a, b) in enumerate(zip(clips, clips[1:])):
+        beats = 0
+        if a.matched and b.matched:
+            beats = min(a.audio.shape[1] - a.re, b.rs, want) // beat
+            beats = beats - beats % 4 if beats >= 4 else beats  # できるだけ小節単位で
+        clash = bridge.key_distance(a.key, b.key) >= KEY_CLASH
+        if bridges == "always" or (bridges == "auto" and (beats == 0 or clash)):
+            report(0.8 + 0.1 * i / n, f"ブリッジを生成中 ({i + 1}→{i + 2})")
+            br, join_a, join_b, info = bridge_clip(a, b, max(4, bars))
+            br.gain = float(np.clip(level / (np.sqrt(np.mean(br.audio ** 2)) + 1e-9), 0.25, 4))
+            items += [br, b]
+            joins += [join_a, join_b]
+            nexts.append({"kind": "bridge", **info})
+        else:
+            items.append(b)
+            joins.append((beats * beat, beat))
+            nexts.append({"kind": "crossfade", "beats": beats} if beats else {"kind": "echo"})
 
     report(0.9, "つなぎを作成中")
-    out, starts, kinds = build_mix(clips, beat, bars)
+    out, spans = build_mix(items, joins, want)
     peak = np.max(np.abs(out))
     if peak > 0.98:
         out *= 0.98 / peak
     report(0.95, "書き出し中")
     sf.write(output, out.T, SR)
 
-    items = []
-    for i, (t, c, sp, (ms, me)) in enumerate(zip(tracks, clips, speeds, starts)):
-        items.append({
+    ids = {id(c) for c in clips}
+    track_spans = [sp for c, sp in zip(items, spans) if id(c) in ids]
+    result = []
+    for i, (t, c, sp, (ms, me)) in enumerate(zip(tracks, clips, speeds, track_spans)):
+        result.append({
             "path": t.spec.path,
             "bpm": 60 / t.period if t.period else None,
+            "key": bridge.key_name(c.key),
             "stretch": (sp - 1) if c.matched else None,
             "start": t.start, "end": t.end, "loops": t.spec.loops,
             "mix_start": ms, "mix_end": me,
-            "next_beats": kinds[i] if i < len(kinds) else None,  # 次の曲へのクロスフェード拍数（0 = エコーアウト）
+            "next": nexts[i] if i < len(nexts) else None,  # 次の曲へのつなぎ方
         })
     report(1.0, "完了")
-    return {"bpm": bpm, "duration": out.shape[1] / SR, "tracks": items}
+    return {"bpm": bpm, "duration": out.shape[1] / SR, "tracks": result}
 
 
-def describe_transition(beats):
-    if not beats:
+def describe_transition(nxt):
+    if nxt["kind"] == "echo":
         return "エコーアウトで切り替え"
-    return (f"{beats // 4}小節" if beats % 4 == 0 else f"{beats}拍") + "のクロスフェード（ベーススワップ）"
+    if nxt["kind"] == "crossfade":
+        beats = nxt["beats"]
+        return (f"{beats // 4}小節" if beats % 4 == 0 else f"{beats}拍") + "のクロスフェード（ベーススワップ）"
+    tempo = lambda t: f"{t:.0f} BPM" if t else "テンポなし"
+    return (f"{nxt['bars']}小節のブリッジを生成（{tempo(nxt['from_bpm'])} → {tempo(nxt['to_bpm'])}、"
+            f"{nxt['from_key']} → {nxt['to_key']}）")
 
 
 def main():
@@ -481,11 +545,13 @@ def main():
     ap.add_argument("--bpm", type=float, help="ミックス全体のテンポ。省略すると自動")
     ap.add_argument("--max-stretch", type=float, default=0.15,
                     help="テンポを変えてよい最大の割合。既定 0.15 (=±15%%)")
+    ap.add_argument("--bridge", choices=["auto", "always", "off"], default="auto",
+                    help="曲の間につなぎのビートを生成する: auto=テンポかキーが合わないとき（既定）, always=いつも, off=しない")
     args = ap.parse_args()
 
     try:
         result = make_mix([parse_spec(s) for s in args.tracks], args.output, args.bars, args.bpm,
-                          args.max_stretch, progress=lambda frac, msg: print(msg))
+                          args.max_stretch, args.bridge, progress=lambda frac, msg: print(msg))
     except MixError as e:
         sys.exit(str(e))
 
@@ -495,10 +561,10 @@ def main():
         tempo = f"{t['bpm']:.1f} BPM" if t["bpm"] else "テンポ不定"
         change = f" → {t['stretch'] * 100:+.1f}%" if t["stretch"] is not None else ("（テンポ差が大きいので変えない）" if t["bpm"] else "")
         loops = f" ×{t['loops']}" if t["loops"] > 1 else ""
-        print(f"[{i + 1}] {t['path']}  {tempo}{change}")
+        print(f"[{i + 1}] {t['path']}  {tempo} · {t['key']}{change}")
         print(f"    範囲 {fmt(t['start'])}-{fmt(t['end'])}{loops}  →  ミックス内 {fmt(t['mix_start'])}-{fmt(t['mix_end'])}")
-        if t["next_beats"] is not None:
-            print(f"    ↓ {describe_transition(t['next_beats'])}")
+        if t["next"]:
+            print(f"    ↓ {describe_transition(t['next'])}")
     print(f"\n書き出し: {args.output}  ({fmt(result['duration'])})")
 
 

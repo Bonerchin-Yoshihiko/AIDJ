@@ -28,6 +28,13 @@
           <option value="0.25">±25%</option>
         </select>
       </label>
+      <label title="テンポやキーが合わない曲の間に、両方をつなぐビートを自動で作ります">つなぎのビート生成
+        <select id="bridge">
+          <option value="auto" selected>合わないときだけ</option>
+          <option value="always">いつも</option>
+          <option value="off">しない</option>
+        </select>
+      </label>
     </div>
     <button id="mixBtn" class="primary" disabled>ミックスする</button>
   </header>

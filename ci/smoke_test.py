@@ -83,6 +83,28 @@ def check_wavs():
     print("いろいろな WAV: すべて OK /", r.json()["error"])
 
 
+def run_mix(items, bridge, save_as):
+    jid = requests.post(f"{URL}/api/mix", json={"items": items, "bars": 8, "bridge": bridge}).json()["id"]
+    t0 = time.time()
+    while (job := requests.get(f"{URL}/api/mix/{jid}").json())["state"] == "running":
+        if time.time() - t0 > 900:
+            sys.exit("ミックスが終わりません")
+        time.sleep(1)
+    if job["state"] != "done":
+        sys.exit(f"ミックスに失敗: {job.get('error')}")
+    res = job["result"]
+    print(f"ミックス OK（ブリッジ={bridge}, {time.time() - t0:.0f}秒）: {res['bpm']:.1f} BPM, {res['duration']:.1f}秒")
+    for t in res["tracks"]:
+        print("  ", {k: (round(v, 3) if isinstance(v, float) else v) for k, v in t.items()})
+    mix_path = os.path.join(OUT, "mix.wav")
+    with open(mix_path, "wb") as f:
+        f.write(requests.get(f"{URL}/api/mix/{jid}/audio").content)
+    y, sr = sf.read(mix_path)
+    sf.write(os.path.join(OUT, save_as), y, sr)
+    os.remove(mix_path)
+    return res, y, sr
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     # mp3 の読み込みと日本語のファイル名も確かめる
@@ -100,32 +122,27 @@ def main():
         assert abs(a["bpm"] - 124) < 1 and abs(b["bpm"] - 128) < 1 and not c["steady"], "BPM の検出がおかしい"
         check_wavs()
 
+        # ブリッジなし: 1→2 は 8小節のクロスフェード、2→3（テンポ不定のピアノ）はエコーアウト
         items = [{"id": a["id"], "start": 31, "end": 62}, {"id": b["id"], "start": 30, "end": 45, "loops": 2},
                  {"id": c["id"], "start": 10, "end": 40}]
-        jid = requests.post(f"{URL}/api/mix", json={"items": items, "bars": 8}).json()["id"]
-        t0 = time.time()
-        while (job := requests.get(f"{URL}/api/mix/{jid}").json())["state"] == "running":
-            if time.time() - t0 > 900:
-                sys.exit("ミックスが終わりません")
-            time.sleep(1)
-        if job["state"] != "done":
-            sys.exit(f"ミックスに失敗: {job.get('error')}")
-        res = job["result"]
-        print(f"ミックス OK（{time.time() - t0:.0f}秒）: {res['bpm']:.1f} BPM, {res['duration']:.1f}秒")
-        for t in res["tracks"]:
-            print("  ", {k: (round(v, 3) if isinstance(v, float) else v) for k, v in t.items()})
-
-        mix_path = os.path.join(OUT, "mix.wav")
-        with open(mix_path, "wb") as f:
-            f.write(requests.get(f"{URL}/api/mix/{jid}/audio").content)
-        y, sr = sf.read(mix_path)
-        sf.write(os.path.join(OUT, "mix.mp3"), y, sr)
-        os.remove(mix_path)
-
+        res, y, sr = run_mix(items, "off", "mix_no_bridge.mp3")
         assert abs(res["bpm"] - 126) < 0.5, "ミックスのテンポがおかしい"
-        assert res["tracks"][0]["next_beats"] == 32, "1→2曲目が8小節のクロスフェードになっていない"
-        assert res["tracks"][1]["next_beats"] == 0, "2→3曲目がエコーアウトになっていない"
+        assert res["tracks"][0]["next"] == {"kind": "crossfade", "beats": 32}, "1→2曲目が8小節のクロスフェードになっていない"
+        assert res["tracks"][1]["next"] == {"kind": "echo"}, "2→3曲目がエコーアウトになっていない"
         assert 110 < len(y) / sr < 130, "ミックスの長さがおかしい"
+
+        # ブリッジあり: テンポもキーも違う 90 BPM・F# メジャーの曲と、テンポ不定のピアノの前にブリッジが入る
+        g = upload("demo/groove_90.wav", "groove_90.wav")
+        assert g["key"] == "F# メジャー", f"キーの推定がおかしい: {g['key']}"
+        items = [{"id": a["id"], "start": 31, "end": 62}, {"id": b["id"], "start": 30, "end": 45},
+                 {"id": g["id"], "start": 42.7, "end": 85.3}, {"id": c["id"], "start": 10, "end": 40}]
+        res, y, sr = run_mix(items, "auto", "mix_bridge.mp3")
+        kinds = [t["next"]["kind"] for t in res["tracks"][:-1]]
+        assert kinds == ["crossfade", "bridge", "bridge"], f"つなぎ方がおかしい: {kinds}"
+        br = res["tracks"][1]["next"]
+        assert abs(br["from_bpm"] - res["bpm"]) < 1 and abs(br["to_bpm"] - 90) < 1, f"ブリッジのテンポがおかしい: {br}"
+        assert br["to_key"] == "F# メジャー", f"ブリッジの行き先のキーがおかしい: {br}"
+        assert res["tracks"][2]["next"]["to_bpm"] is None, "テンポ不定の曲へのブリッジがおかしい"
         print("すべて OK")
     finally:
         proc.kill()

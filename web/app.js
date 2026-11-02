@@ -51,9 +51,14 @@ function toast(text, error = false) {
   setTimeout(() => el.remove(), error ? 7000 : 4000);
 }
 
-function transitionText(beats) {
-  if (!beats) return "エコーアウトで切り替え";
-  return (beats % 4 === 0 ? `${beats / 4}小節` : `${beats}拍`) + "のクロスフェード（ベーススワップ）";
+function transitionText(next) {
+  if (next.kind === "echo") return "エコーアウトで切り替え";
+  if (next.kind === "crossfade") {
+    const b = next.beats;
+    return (b % 4 === 0 ? `${b / 4}小節` : `${b}拍`) + "のクロスフェード（ベーススワップ）";
+  }
+  const tempo = t => (t ? `${Math.round(t)} BPM` : "テンポなし");
+  return `${next.bars}小節のブリッジを生成（${tempo(next.from_bpm)} → ${tempo(next.to_bpm)}、${next.from_key} → ${next.to_key}）`;
 }
 
 function stopAll(except) {
@@ -158,8 +163,8 @@ function move(t, dir) {
 }
 
 function duplicate(t) {
-  const { id, name, duration, bpm, steady, peaks, start, end } = t;
-  const c = createTrack({ id, name, duration, bpm, steady, peaks, start, end });
+  const { id, name, duration, bpm, steady, key, peaks, start, end } = t;
+  const c = createTrack({ id, name, duration, bpm, steady, key, peaks, start, end });
   tracks.splice(tracks.indexOf(t) + 1, 0, c);
   render();
   ready(c);
@@ -193,7 +198,7 @@ async function upload(t, file) {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || "読み込みに失敗しました");
     const [start, end] = data.suggested;
-    Object.assign(t, { id: data.id, duration: data.duration, bpm: data.bpm, steady: data.steady, peaks: data.peaks, start, end });
+    Object.assign(t, { id: data.id, duration: data.duration, bpm: data.bpm, steady: data.steady, key: data.key, peaks: data.peaks, start, end });
     if (tracks.includes(t)) ready(t);
   } catch (e) {
     toast(`${file.name}: ${e.message}`, true);
@@ -217,7 +222,7 @@ function render() {
       link.className = "link" + (fresh ? " done" : "");
       link.style.setProperty("--from", tracks[i - 1].color);
       link.style.setProperty("--to", t.color);
-      link.textContent = fresh ? transitionText(mix.result.tracks[i - 1].next_beats) : "つなぎ";
+      link.textContent = fresh ? transitionText(mix.result.tracks[i - 1].next) : "つなぎ";
       nodes.push(link);
     }
     $(".num", t.el).textContent = i + 1;
@@ -241,7 +246,7 @@ function refresh(t) {
     meta.textContent = "解析中…";
     return;
   }
-  meta.textContent = `${t.steady && t.bpm ? `${t.bpm.toFixed(1)} BPM` : "テンポ不定"} · ${fmt(t.duration)}`;
+  meta.textContent = `${t.steady && t.bpm ? `${t.bpm.toFixed(1)} BPM` : "テンポ不定"} · ${t.key} · ${fmt(t.duration)}`;
   if (document.activeElement !== q(".t-start")) q(".t-start").value = fmt(t.start);
   if (document.activeElement !== q(".t-end")) q(".t-end").value = fmt(t.end);
   const len = t.end - t.start;
@@ -271,6 +276,7 @@ async function startMix() {
     bars: Number($("#bars").value),
     bpm: parseFloat($("#bpm").value) || null,
     max_stretch: Number($("#maxStretch").value),
+    bridge: $("#bridge").value,
   };
   render();
   $("#deck").hidden = false;
@@ -313,10 +319,21 @@ function showMix(id, result, colors, startVersion) {
     ...WAVE, container: $("#deckWave"), height: 64, plugins: [regions],
     url: `/api/mix/${id}/audio`, peaks: [result.peaks], duration: result.duration,
   });
-  ws.once("ready", () => result.tracks.forEach((r, i) => regions.addRegion({
-    start: r.mix_start, end: r.mix_end, color: rgba(colors[i], 0.28),
-    drag: false, resize: false, content: String(i + 1),
-  })));
+  ws.once("ready", () => result.tracks.forEach((r, i) => {
+    regions.addRegion({
+      start: r.mix_start, end: r.mix_end, color: rgba(colors[i], 0.28),
+      drag: false, resize: false, content: String(i + 1),
+    });
+    if (r.next?.kind === "bridge") {  // ブリッジは次の曲の範囲の手前まで
+      const label = document.createElement("span");
+      label.className = "bridge-label";
+      label.textContent = "ブリッジ";
+      regions.addRegion({
+        start: r.mix_end, end: result.tracks[i + 1].mix_start, color: "rgba(233, 235, 241, 0.10)",
+        drag: false, resize: false, content: label,
+      });
+    }
+  }));
   mix = { id, result, ws, version: startVersion };
 
   const time = () => { $("#deckTime").textContent = `${fmt(ws.getCurrentTime())} / ${fmt(result.duration)}`; };
@@ -347,7 +364,7 @@ async function save() {
 mixBtn.onclick = startMix;
 $("#deckPlay").onclick = () => mix?.ws.playPause();
 $("#saveBtn").onclick = () => save().catch(e => toast(e.message, true));
-for (const sel of ["#bars", "#bpm", "#maxStretch"]) $(sel).addEventListener("change", changed);
+for (const sel of ["#bars", "#bpm", "#maxStretch", "#bridge"]) $(sel).addEventListener("change", changed);
 
 const fileInput = $("#fileInput");
 fileInput.onchange = () => { addFiles(fileInput.files); fileInput.value = ""; };

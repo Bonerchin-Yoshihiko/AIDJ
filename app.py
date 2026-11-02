@@ -114,6 +114,7 @@ def start_mix():
                 res = aidj.make_mix(specs, job["path"], bars=int(body.get("bars", 8)),
                                     bpm=float(body["bpm"]) if body.get("bpm") else None,
                                     max_stretch=float(body.get("max_stretch", 0.15)),
+                                    bridges=body.get("bridge", "auto"),
                                     progress=lambda frac, msg: job.update(progress=frac, message=msg))
             for t, it in zip(res["tracks"], items):
                 t.pop("path")
