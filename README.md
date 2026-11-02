@@ -9,8 +9,7 @@
    - 「Windows によって PC が保護されました」と出たら「詳細情報」→「実行」
    - うまく動かないときは `%TEMP%\aidj.log` にログが残っています
 
-新しい版を作るには `v0.2.0` のようなタグを push します（GitHub Actions が exe を作って動作テストし、Releases に載せます）。
-main に push するたびにも作られ、Actions の実行結果の「Artifacts」からダウンロードできます。
+main に push するたびに、GitHub Actions が exe を作って動作テストし、テストが通ったら Releases に新しい版（v0.1.番号）を載せます。
 
 同梱している rubberband（高音質なテンポ調整）は GPL ライセンスです。アプリを人に配るときは注意してください。
 

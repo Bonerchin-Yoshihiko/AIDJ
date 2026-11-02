@@ -1,6 +1,6 @@
 # Windows 版のアプリを自動で作る。
-#   - main に push するたび: exe を作って動作テストし、Actions の「Artifacts」に置く
-#   - v1.0 のようなタグを push したとき: さらに「Releases」に zip を載せる（ここからダウンロードするのが簡単）
+#   main に push するたび（または v1.0 のようなタグを push したとき）、exe を作って動作テストし、
+#   テストが通ったら「Releases」に zip を載せる（ここからダウンロードするのが簡単）
 name: Windows 版をビルド
 
 on:
@@ -16,6 +16,9 @@ jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 45
+    env:
+      PYTHONUTF8: "1"  # Windows のコンソールは cp1252 で、日本語を print すると落ちるため
+      PYTHONIOENCODING: utf-8
     steps:
       - uses: actions/checkout@v4
 
@@ -67,13 +70,15 @@ jobs:
           path: dist/AI DJ/
 
       - name: zip にまとめる
-        if: startsWith(github.ref, 'refs/tags/v')
         run: 7z a -tzip AI-DJ-windows.zip "./dist/AI DJ"
 
       - name: Releases に載せる
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          # タグを push したときはそのタグ、main に push したときは v0.1.<実行番号> を自動で付ける
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v0.1.{0}', github.run_number) }}
+          target_commitish: ${{ github.sha }}
+          make_latest: "true"
           files: AI-DJ-windows.zip
           body: |
             Windows 版の AI DJ です。
