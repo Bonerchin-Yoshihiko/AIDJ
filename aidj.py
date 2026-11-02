@@ -18,6 +18,7 @@ import math
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -93,13 +94,79 @@ def fmt(sec):
 
 
 def load(path):
+    """音声を読み込んで (2, n) の配列にする。ふつうの方法で読めなければ WAV を直接読んでみる。"""
     try:
         y, _ = librosa.load(path, sr=SR, mono=False)
     except Exception as e:
-        raise MixError(f"読み込めない形式です: {os.path.basename(path)}（mp3 / wav / flac / ogg を使ってください）") from e
+        y = read_wav_lenient(path)
+        if y is None:
+            raise MixError(f"{os.path.basename(path)}: {why_unreadable(path)}") from e
+    if y.size == 0:  # ヘッダーに「データの大きさ 0」と書かれた WAV は、ふつうに読むと空になる
+        y = read_wav_lenient(path)
+        if y is None or y.size == 0:
+            raise MixError(f"{os.path.basename(path)}: 音が入っていないか、ファイルが壊れています")
     if y.ndim == 1:
         y = np.stack([y, y])
     return y[:2]
+
+
+WAV_TAGS = {1: "pcm", 3: "float"}
+
+
+def read_wav_lenient(path):
+    """ヘッダーが壊れた WAV を、中身を直接見て読む（録音ソフトが途中で落ちたときなど）。
+
+    データの大きさが 0 や実際より大きいと書かれていても、ファイルの最後まで読む。
+    PCM（8/16/24/32bit）と浮動小数点（32/64bit）だけ。読めなければ None。
+    """
+    with open(path, "rb") as f:
+        data = f.read()
+    if data[:4] not in (b"RIFF", b"RF64") or data[8:12] != b"WAVE":
+        return None
+    pos, fmt = 12, None
+    while pos + 8 <= len(data):
+        cid, size = data[pos:pos + 4], struct.unpack("<I", data[pos + 4:pos + 8])[0]
+        body = pos + 8
+        if cid == b"fmt " and size >= 16:
+            tag, channels, sr, _, _, bits = struct.unpack("<HHIIHH", data[body:body + 16])
+            if tag == 0xFFFE and size >= 26:  # WAVE_FORMAT_EXTENSIBLE: 本当の形式は後ろに書いてある
+                tag = struct.unpack("<H", data[body + 24:body + 26])[0]
+            fmt = (WAV_TAGS.get(tag), channels, sr, bits)
+        elif cid == b"data" and fmt:
+            kind, channels, sr, bits = fmt
+            end = len(data) if size in (0, 0xFFFFFFFF) or body + size > len(data) else body + size
+            raw = data[body:end]
+            raw = raw[:len(raw) - len(raw) % (channels * bits // 8)]
+            if kind == "pcm" and bits == 24:
+                b = np.frombuffer(raw, np.uint8).reshape(-1, 3).astype(np.int32)
+                x = ((b[:, 0] | (b[:, 1] << 8) | (b[:, 2] << 16)) << 8 >> 8) / 2 ** 23
+            elif kind == "pcm" and bits in (8, 16, 32):
+                dtype = {8: np.uint8, 16: np.int16, 32: np.int32}[bits]
+                x = np.frombuffer(raw, dtype).astype(np.float64)
+                x = (x - 128) / 128 if bits == 8 else x / 2 ** (bits - 1)
+            elif kind == "float" and bits in (32, 64):
+                x = np.frombuffer(raw, np.float32 if bits == 32 else np.float64)
+            else:
+                return None
+            y = x.reshape(-1, channels).T.astype(np.float32)
+            return librosa.resample(y, orig_sr=sr, target_sr=SR) if sr != SR else y
+        if size == 0xFFFFFFFF:
+            break
+        pos = body + size + (size & 1)
+    return None
+
+
+def why_unreadable(path):
+    """読めなかった理由を、ファイルの先頭を見て説明する。"""
+    with open(path, "rb") as f:
+        head = f.read(64)
+    if head[4:8] == b"ftyp":
+        return "中身は m4a / AAC 形式です（拡張子だけ変わっています）。mp3 か wav に変換してください"
+    if head[:4] == b"\x30\x26\xb2\x75":
+        return "中身は WMA 形式です。mp3 か wav に変換してください"
+    if head[:4] in (b"RIFF", b"RF64") and head[8:12] == b"WAVE":
+        return "この WAV は特殊な圧縮形式で保存されていて読めません。ふつうの WAV（PCM）か mp3 に変換してください"
+    return "音声ファイルとして読めませんでした（壊れているか、対応していない形式です。mp3 / wav / flac / ogg が使えます）"
 
 
 _beat_cache = {}
@@ -136,9 +203,9 @@ def suggest_range(mono, beats, bars=16):
     return start, min(dur, start + length)
 
 
-def overview(path):
+def overview(path, y=None):
     """アプリで曲を読み込んだときの情報（長さ・波形・おおよそのBPM・おすすめ範囲）。"""
-    y = load(path)
+    y = load(path) if y is None else y
     mono = librosa.to_mono(y)
     beats = beat_times(path, mono)
     grid = fit_grid(beats, 0, len(mono) / SR)

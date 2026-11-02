@@ -40,6 +40,49 @@ def upload(path, name):
     return info
 
 
+def wav_variants():
+    """いろいろな種類の WAV を作る（48kHz/24bit、64bit 浮動小数点、ADPCM 圧縮、ヘッダーが壊れたもの など）。"""
+    y, sr = sf.read("demo/house_128.wav", frames=44100 * 20)
+    d = os.path.join(OUT, "wavs")
+    os.makedirs(d, exist_ok=True)
+    files = {
+        "48k_24bit.wav": dict(samplerate=48000, subtype="PCM_24"),
+        "float64.wav": dict(subtype="DOUBLE"),
+        "ms_adpcm.wav": dict(subtype="MS_ADPCM"),
+        "ima_adpcm.wav": dict(subtype="IMA_ADPCM"),
+        "8bit_mono.wav": dict(subtype="PCM_U8", mono=True),
+        "extensible.wav": dict(subtype="PCM_16", format="WAVEX"),
+        "header_broken.wav": dict(subtype="PCM_16"),
+    }
+    durations = {}
+    for name, opt in files.items():
+        data = y.mean(axis=1) if opt.pop("mono", False) else y
+        rate = opt.pop("samplerate", sr)
+        sf.write(os.path.join(d, name), data, rate, **opt)
+        durations[name] = len(data) / rate
+    with open(os.path.join(d, "header_broken.wav"), "r+b") as f:  # data チャンクの大きさを 0 にする
+        raw = f.read()
+        f.seek(raw.find(b"data") + 4)
+        f.write(b"\0\0\0\0")
+    with open(os.path.join(d, "actually_m4a.wav"), "wb") as f:  # 中身が m4a の「.wav」
+        f.write(b"\0\0\0\x20ftypM4A " + bytes(2000))
+    return d, durations
+
+
+def check_wavs():
+    d, durations = wav_variants()
+    for name, duration in durations.items():
+        info = upload(os.path.join(d, name), name)
+        assert abs(info["duration"] - duration) < 0.1, f"{name} の長さがおかしい: {info['duration']}"
+        with open(os.path.join(d, "preview.wav"), "wb") as f:
+            f.write(requests.get(f"{URL}/api/tracks/{info['id']}/audio").content)
+        p = sf.info(os.path.join(d, "preview.wav"))
+        assert p.subtype == "PCM_16", f"{name} のプレビューが再生しやすい形式になっていない: {p.subtype}"
+    r = requests.post(f"{URL}/api/tracks", files={"file": ("actually_m4a.wav", open(os.path.join(d, "actually_m4a.wav"), "rb"))})
+    assert r.status_code == 400 and "m4a" in r.json()["error"], f"中身が m4a のときの説明がおかしい: {r.text}"
+    print("いろいろな WAV: すべて OK /", r.json()["error"])
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     # mp3 の読み込みと日本語のファイル名も確かめる
@@ -55,6 +98,7 @@ def main():
         c = upload("demo/piano_free.wav", "piano_free.wav")
         assert a["name"] == "テスト曲A.mp3"
         assert abs(a["bpm"] - 124) < 1 and abs(b["bpm"] - 128) < 1 and not c["steady"], "BPM の検出がおかしい"
+        check_wavs()
 
         items = [{"id": a["id"], "start": 31, "end": 62}, {"id": b["id"], "start": 30, "end": 45, "loops": 2},
                  {"id": c["id"], "start": 10, "end": 40}]

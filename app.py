@@ -42,7 +42,9 @@ import aidj  # noqa: E402
 
 WORK = tempfile.mkdtemp(prefix="aidj-")
 atexit.register(shutil.rmtree, WORK, ignore_errors=True)
-PREVIEWABLE = {".mp3", ".wav", ".m4a"}  # これ以外はプレビュー用に wav を作る
+# mp3 以外は、画面で必ず再生できる 16bit の wav をプレビュー用に作る
+# （64bit 浮動小数点や ADPCM 圧縮の WAV は、画面のブラウザ部分では再生できないため）
+PREVIEWABLE = {".mp3"}
 
 app = Flask(__name__, static_folder=os.path.join(HERE, "web"), static_url_path="/static")
 tracks = {}          # id -> {"path", "preview", "name"}
@@ -69,14 +71,18 @@ def add_track():
     path = os.path.join(WORK, tid + ext)
     f.save(path)
     try:
-        info = aidj.overview(path)
-    except aidj.MixError as e:
+        y = aidj.load(path)
+        info = aidj.overview(path, y)
+        preview = path
+        if ext not in PREVIEWABLE:
+            preview = os.path.join(WORK, tid + "-preview.wav")
+            sf.write(preview, y.T, aidj.SR, subtype="PCM_16")
+    except Exception as e:
         os.remove(path)
-        return jsonify(error=str(e)), 400
-    preview = path
-    if ext not in PREVIEWABLE:
-        preview = os.path.join(WORK, tid + "-preview.wav")
-        sf.write(preview, aidj.load(path).T, aidj.SR)
+        if isinstance(e, aidj.MixError):  # ファイル名は画面側で付けるので、理由だけ返す
+            return jsonify(error=str(e).replace(f"{os.path.basename(path)}: ", "")), 400
+        traceback.print_exc()  # 想定外のエラーはログに残す
+        return jsonify(error=f"読み込み中にエラーが起きました（{e}）。詳しくは {LOG_PATH}"), 500
     tracks[tid] = {"path": path, "preview": preview, "name": f.filename}
     return jsonify(id=tid, name=f.filename, **info)
 
