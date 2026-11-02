@@ -7,3 +7,4 @@ demo/
 ci-output/
 *.wav
 models/
+!ci/fixtures/*.wav
